@@ -22,6 +22,7 @@ class ResumeJobRequest(BaseModel):
     conversation_id: str
     user_id: str
     answer: str
+    input_file_path: str
 
 
 def build_config(conversation_id, user_id):
@@ -61,13 +62,22 @@ def send_job_event(event_type: str, conversation_id: str, user_id: str, payload:
         print("Lỗi gửi event:", e)
 
 
-def build_result(config):
+def build_result(config, input_file_path: str = None):
     final_state = graph.get_state(config)
-    return {
+
+    result = {
         "status": final_state.values.get("status"),
         "valid_rows": final_state.values.get("valid_rows", []),
         "invalid_rows": final_state.values.get("invalid_rows", []),
     }
+
+    if input_file_path:
+        output_file_path = input_file_path.replace("input_", "output_")
+        df = pd.DataFrame(final_state.values.get("valid_rows", []))
+        df.to_csv(output_file_path, index=False)
+        result["output_file_path"] = output_file_path
+
+    return result
 
 
 @app.post("/jobs/start")
@@ -117,5 +127,5 @@ def resume_job(request: ResumeJobRequest):
             send_job_event("INTERRUPT", request.conversation_id, request.user_id, chunk)
             return
 
-    result = build_result(config)
+    result = build_result(config, request.input_file_path)
     send_job_event("JOB_DONE", request.conversation_id, request.user_id, result)
