@@ -1,11 +1,10 @@
 import os
 import httpx
 import pandas as pd
-
 from fastapi import FastAPI
 from pydantic import BaseModel
 from langgraph.types import Command
-
+import dataclasses
 from workflow import graph
 
 app = FastAPI()
@@ -34,6 +33,19 @@ def build_config(conversation_id, user_id):
     }
 
 
+def make_serializable(obj):
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return dataclasses.asdict(obj)
+    elif hasattr(obj, "__dict__"):
+        return obj.__dict__
+    elif isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [make_serializable(i) for i in obj]
+    else:
+        return str(obj)
+
+
 def send_job_event(event_type: str, conversation_id: str, user_id: str, payload: dict):
     try:
         httpx.post(
@@ -42,7 +54,7 @@ def send_job_event(event_type: str, conversation_id: str, user_id: str, payload:
                 "type": event_type,
                 "conversation_id": conversation_id,
                 "user_id": user_id,
-                "payload": payload
+                "payload": make_serializable(payload)
             }
         )
     except Exception as e:
@@ -51,7 +63,6 @@ def send_job_event(event_type: str, conversation_id: str, user_id: str, payload:
 
 def build_result(config):
     final_state = graph.get_state(config)
-
     return {
         "status": final_state.values.get("status"),
         "valid_rows": final_state.values.get("valid_rows", []),
@@ -81,43 +92,14 @@ def start_job(request: StartJobRequest):
         config=config,
         stream_mode="updates"
     ):
-        send_job_event(
-            "GRAPH_UPDATE",
-            request.conversation_id,
-            request.user_id,
-            chunk
-        )
+        send_job_event("GRAPH_UPDATE", request.conversation_id, request.user_id, chunk)
 
         if "__interrupt__" in chunk:
-            send_job_event(
-                "INTERRUPT",
-                request.conversation_id,
-                request.user_id,
-                chunk
-            )
-
-            return {
-                "type": "INTERRUPT",
-                "conversation_id": request.conversation_id,
-                "user_id": request.user_id,
-                "payload": chunk
-            }
+            send_job_event("INTERRUPT", request.conversation_id, request.user_id, chunk)
+            return
 
     result = build_result(config)
-
-    send_job_event(
-        "JOB_DONE",
-        request.conversation_id,
-        request.user_id,
-        result
-    )
-
-    return {
-        "type": "JOB_DONE",
-        "conversation_id": request.conversation_id,
-        "user_id": request.user_id,
-        "payload": result
-    }
+    send_job_event("JOB_DONE", request.conversation_id, request.user_id, result)
 
 
 @app.post("/jobs/resume")
@@ -129,40 +111,11 @@ def resume_job(request: ResumeJobRequest):
         config=config,
         stream_mode="updates"
     ):
-        send_job_event(
-            "GRAPH_UPDATE",
-            request.conversation_id,
-            request.user_id,
-            chunk
-        )
+        send_job_event("GRAPH_UPDATE", request.conversation_id, request.user_id, chunk)
 
         if "__interrupt__" in chunk:
-            send_job_event(
-                "INTERRUPT",
-                request.conversation_id,
-                request.user_id,
-                chunk
-            )
-
-            return {
-                "type": "INTERRUPT",
-                "conversation_id": request.conversation_id,
-                "user_id": request.user_id,
-                "payload": chunk
-            }
+            send_job_event("INTERRUPT", request.conversation_id, request.user_id, chunk)
+            return
 
     result = build_result(config)
-
-    send_job_event(
-        "JOB_DONE",
-        request.conversation_id,
-        request.user_id,
-        result
-    )
-
-    return {
-        "type": "JOB_DONE",
-        "conversation_id": request.conversation_id,
-        "user_id": request.user_id,
-        "payload": result
-    }
+    send_job_event("JOB_DONE", request.conversation_id, request.user_id, result)
