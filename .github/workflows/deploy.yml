@@ -7,7 +7,6 @@ on:
 
 jobs:
   build-and-push:
-    needs: run-test
     runs-on: ubuntu-latest
 
     permissions:
