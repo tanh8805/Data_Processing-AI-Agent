@@ -1,7 +1,7 @@
 import os
 import json
 import pandas as pd
-import websocket
+import stomp
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -12,6 +12,8 @@ from workflow import graph
 app = FastAPI()
 
 LOCALHOST = os.getenv("LOCALHOST", "localhost")
+STOMP_HOST = LOCALHOST
+STOMP_PORT = 8080
 
 
 class StartJobRequest(BaseModel):
@@ -35,14 +37,49 @@ def build_config(conversation_id, user_id):
     }
 
 
-def send_socket(data: dict):
+def send_stomp(destination: str, data: dict):
+    conn = None
+
     try:
-        ws = websocket.WebSocket()
-        ws.connect("ws://{}:8080/ws/jobs".format(LOCALHOST))
-        ws.send(json.dumps(data, ensure_ascii=False))
-        ws.close()
+        conn = stomp.Connection([(STOMP_HOST, STOMP_PORT)])
+        conn.connect(wait=True)
+
+        conn.send(
+            destination=destination,
+            body=json.dumps(data, ensure_ascii=False),
+            headers={
+                "content-type": "application/json"
+            }
+        )
+
     except Exception as e:
-        print("Lỗi socket:", e)
+        print("Lỗi STOMP:", e)
+
+    finally:
+        if conn and conn.is_connected():
+            conn.disconnect()
+
+
+def send_job_event(event_type: str, conversation_id: str, user_id: str, payload: dict):
+    send_stomp(
+        destination=f"/app/jobs/{conversation_id}",
+        data={
+            "type": event_type,
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "payload": payload
+        }
+    )
+
+
+def build_result(config):
+    final_state = graph.get_state(config)
+
+    return {
+        "status": final_state.values.get("status"),
+        "valid_rows": final_state.values.get("valid_rows", []),
+        "invalid_rows": final_state.values.get("invalid_rows", []),
+    }
 
 
 @app.post("/jobs/start")
@@ -67,20 +104,20 @@ def start_job(request: StartJobRequest):
         config=config,
         stream_mode="updates"
     ):
-        send_socket({
-            "type": "GRAPH_UPDATE",
-            "conversation_id": request.conversation_id,
-            "user_id": request.user_id,
-            "payload": chunk
-        })
+        send_job_event(
+            "GRAPH_UPDATE",
+            request.conversation_id,
+            request.user_id,
+            chunk
+        )
 
-        if "__interrupt__" in str(chunk):
-            send_socket({
-                "type": "INTERRUPT",
-                "conversation_id": request.conversation_id,
-                "user_id": request.user_id,
-                "payload": chunk
-            })
+        if "__interrupt__" in chunk:
+            send_job_event(
+                "INTERRUPT",
+                request.conversation_id,
+                request.user_id,
+                chunk
+            )
 
             return {
                 "type": "INTERRUPT",
@@ -89,20 +126,14 @@ def start_job(request: StartJobRequest):
                 "payload": chunk
             }
 
-    final_state = graph.get_state(config)
+    result = build_result(config)
 
-    result = {
-        "status": final_state.values["status"],
-        "valid_rows": final_state.values["valid_rows"],
-        "invalid_rows": final_state.values["invalid_rows"],
-    }
-
-    send_socket({
-        "type": "JOB_DONE",
-        "conversation_id": request.conversation_id,
-        "user_id": request.user_id,
-        "payload": result
-    })
+    send_job_event(
+        "JOB_DONE",
+        request.conversation_id,
+        request.user_id,
+        result
+    )
 
     return {
         "type": "JOB_DONE",
@@ -121,20 +152,20 @@ def resume_job(request: ResumeJobRequest):
         config=config,
         stream_mode="updates"
     ):
-        send_socket({
-            "type": "GRAPH_UPDATE",
-            "conversation_id": request.conversation_id,
-            "user_id": request.user_id,
-            "payload": chunk
-        })
+        send_job_event(
+            "GRAPH_UPDATE",
+            request.conversation_id,
+            request.user_id,
+            chunk
+        )
 
-        if "__interrupt__" in str(chunk):
-            send_socket({
-                "type": "INTERRUPT",
-                "conversation_id": request.conversation_id,
-                "user_id": request.user_id,
-                "payload": chunk
-            })
+        if "__interrupt__" in chunk:
+            send_job_event(
+                "INTERRUPT",
+                request.conversation_id,
+                request.user_id,
+                chunk
+            )
 
             return {
                 "type": "INTERRUPT",
@@ -143,20 +174,14 @@ def resume_job(request: ResumeJobRequest):
                 "payload": chunk
             }
 
-    final_state = graph.get_state(config)
+    result = build_result(config)
 
-    result = {
-        "status": final_state.values["status"],
-        "valid_rows": final_state.values["valid_rows"],
-        "invalid_rows": final_state.values["invalid_rows"],
-    }
-
-    send_socket({
-        "type": "JOB_DONE",
-        "conversation_id": request.conversation_id,
-        "user_id": request.user_id,
-        "payload": result
-    })
+    send_job_event(
+        "JOB_DONE",
+        request.conversation_id,
+        request.user_id,
+        result
+    )
 
     return {
         "type": "JOB_DONE",
