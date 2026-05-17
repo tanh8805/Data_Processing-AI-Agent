@@ -200,11 +200,11 @@ def clean_and_normalize_data(state: State):
             {unique_values}
             
             Trả về JSON:
-            {
-              "column_name": {
+            {{
+              "column_name": {{
                 "old_value": "normalized_value"
-              }
-            }
+              }}
+            }}
             """)
 
         response = llm.invoke([system_message, human_message])
