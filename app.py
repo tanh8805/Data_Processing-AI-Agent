@@ -1,7 +1,6 @@
 import os
-import json
+import httpx
 import pandas as pd
-import stomp
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -11,9 +10,7 @@ from workflow import graph
 
 app = FastAPI()
 
-LOCALHOST = os.getenv("LOCALHOST", "localhost")
-STOMP_HOST = LOCALHOST
-STOMP_PORT = 8080
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8080")
 
 
 class StartJobRequest(BaseModel):
@@ -37,39 +34,19 @@ def build_config(conversation_id, user_id):
     }
 
 
-def send_stomp(destination: str, data: dict):
-    conn = None
-
+def send_job_event(event_type: str, conversation_id: str, user_id: str, payload: dict):
     try:
-        conn = stomp.Connection([(STOMP_HOST, STOMP_PORT)])
-        conn.connect(wait=True)
-
-        conn.send(
-            destination=destination,
-            body=json.dumps(data, ensure_ascii=False),
-            headers={
-                "content-type": "application/json"
+        httpx.post(
+            f"{BACKEND_URL}/internal/jobs/event",
+            json={
+                "type": event_type,
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "payload": payload
             }
         )
-
     except Exception as e:
-        print("Lỗi STOMP:", e)
-
-    finally:
-        if conn and conn.is_connected():
-            conn.disconnect()
-
-
-def send_job_event(event_type: str, conversation_id: str, user_id: str, payload: dict):
-    send_stomp(
-        destination=f"/app/jobs/{conversation_id}",
-        data={
-            "type": event_type,
-            "conversation_id": conversation_id,
-            "user_id": user_id,
-            "payload": payload
-        }
-    )
+        print("Lỗi gửi event:", e)
 
 
 def build_result(config):
