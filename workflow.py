@@ -481,66 +481,66 @@ graph = builder.compile(
     checkpointer=checkpointer
 )
 
-config = {
-    "configurable": {
-        "thread_id": "thread_001",
-        "user_id": "001"
-    }
-}
+# config = {
+#     "configurable": {
+#         "thread_id": "thread_001",
+#         "user_id": "001"
+#     }
+# }
 
-input_state = {
-    "headers": [
-        "name",
-        "age",
-        "email"
-    ],
+# input_state = {
+#     "headers": [
+#         "name",
+#         "age",
+#         "email"
+#     ],
 
-    "raw_rows": [
-        {
-            "name": "nguyen van a",
-            "age": 20,
-            "email": "a@gmail.com"
-        },
+#     "raw_rows": [
+#         {
+#             "name": "nguyen van a",
+#             "age": 20,
+#             "email": "a@gmail.com"
+#         },
 
-        {
-            "name": "nguyen van a",
-            "age": None,
-            "email": "b@gmail.com"
-        },
+#         {
+#             "name": "nguyen van a",
+#             "age": None,
+#             "email": "b@gmail.com"
+#         },
 
-        {
-            "name": None,
-            "age": 22,
-            "email": None
-        }
-    ],
+#         {
+#             "name": None,
+#             "age": 22,
+#             "email": None
+#         }
+#     ],
 
-    "invalid_rows": [],
-    "valid_rows": [],
-    "errors": [],
-    "column_stats": {},
-    "status": "START",
-    "impute_strategy": "skip"
-}
+#     "invalid_rows": [],
+#     "valid_rows": [],
+#     "errors": [],
+#     "column_stats": {},
+#     "status": "START",
+#     "impute_strategy": "skip"
+# }
 
-print("=== START ===")
+# print("=== START ===")
 
-for chunk in graph.stream(
-    input_state,
-    config=config,
-    stream_mode="updates"
-):
-    print(chunk)
+# for chunk in graph.stream(
+#     input_state,
+#     config=config,
+#     stream_mode="updates"
+# ):
+#     print(chunk)
 
-choice = input(
-    "Chọn strategy [ai/skip]: "
-).strip().lower()
+# choice = input(
+#     "Chọn strategy [ai/skip]: "
+# ).strip().lower()
 
-print("=== RESUME ===")
+# print("=== RESUME ===")
 
-for chunk in graph.stream(
-    Command(resume=choice),
-    config=config,
-    stream_mode="updates"
-):
-    print(chunk)
+# for chunk in graph.stream(
+#     Command(resume=choice),
+#     config=config,
+#     stream_mode="updates"
+# ):
+#     print(chunk)
