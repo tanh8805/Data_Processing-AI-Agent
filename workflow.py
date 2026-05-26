@@ -394,11 +394,35 @@ def solve_impute_missing_values(state: State):
             "errors": state.get("errors", []) + ["LLM không trả policy hợp lệ."]
         }
 
+    print(f"[IMPUTE] missing_summary={missing_summary}")
+    print(f"[IMPUTE] policy={policy}")
+
+    # Normalize policy keys: map về đúng tên header thực tế (case-insensitive, fuzzy)
+    header_lower_map = {h.lower(): h for h in headers}
+    normalized_policy = {}
+    for col_key, col_policy in policy.items():
+        # Exact match trước
+        if col_key in headers:
+            normalized_policy[col_key] = col_policy
+        # Case-insensitive match
+        elif col_key.lower() in header_lower_map:
+            real_col = header_lower_map[col_key.lower()]
+            normalized_policy[real_col] = col_policy
+        else:
+            # Fuzzy: tìm header nào có tên gần nhất (substring hoặc prefix)
+            for h_lower, h_real in header_lower_map.items():
+                if col_key.lower() in h_lower or h_lower in col_key.lower():
+                    normalized_policy[h_real] = col_policy
+                    break
+            else:
+                print(f"[IMPUTE] WARNING: không map được policy key '{col_key}' vào header nào")
+
+    print(f"[IMPUTE] normalized_policy={normalized_policy}")
+
     # Bước 4: Python apply policy lên toàn bộ rows — không cần LLM nữa
+    applied_count = 0
     for row in valid_rows:
-        for col, col_policy in policy.items():
-            if col not in headers:
-                continue
+        for col, col_policy in normalized_policy.items():
             fill_value = col_policy.get("fill_value")
             treat_zero = col_policy.get("treat_zero_as_missing", False)
             if fill_value is None:
@@ -410,6 +434,9 @@ def solve_impute_missing_values(state: State):
 
             if is_null or is_zero:
                 row[col] = fill_value
+                applied_count += 1
+
+    print(f"[IMPUTE] applied {applied_count} imputations")
 
     return {
         "status": "AI_IMPUTED_MISSING_VALUES",
