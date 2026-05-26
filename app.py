@@ -1,7 +1,7 @@
 import os
 import httpx
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from pydantic import BaseModel
 from langgraph.types import Command
 import dataclasses
@@ -17,14 +17,6 @@ class StartJobRequest(BaseModel):
     conversation_id: str
     user_id: str
     file_path: str
-
-
-class ResumeJobRequest(BaseModel):
-    conversation_id: str
-    user_id: str
-    answer: str
-    input_file_path: str
-    prompt: Optional[str] = None
 
 
 def build_config(conversation_id, user_id):
@@ -116,25 +108,33 @@ def start_job(request: StartJobRequest):
 
 
 @app.post("/jobs/resume")
-def resume_job(request: ResumeJobRequest):
-    config = build_config(request.conversation_id, request.user_id)
+def resume_job(
+    conversation_id: str = Query(...),
+    user_id: str = Query(...),
+    answer: str = Query(...),
+    input_file_path: str = Query(...),
+    prompt: Optional[str] = Query(None),
+):
+    config = build_config(conversation_id, user_id)
 
     resume_payload = (
-        {"strategy": request.answer, "prompt": request.prompt}
-        if request.prompt
-        else request.answer
+        {"strategy": answer, "prompt": prompt}
+        if prompt
+        else answer
     )
+
+    print(f"[RESUME] answer={answer} | prompt={prompt} | input_file_path={input_file_path}")
 
     for chunk in graph.stream(
         Command(resume=resume_payload),
         config=config,
         stream_mode="updates"
     ):
-        send_job_event("GRAPH_UPDATE", request.conversation_id, request.user_id, chunk)
+        send_job_event("GRAPH_UPDATE", conversation_id, user_id, chunk)
 
         if "__interrupt__" in chunk:
-            send_job_event("INTERRUPT", request.conversation_id, request.user_id, chunk)
+            send_job_event("INTERRUPT", conversation_id, user_id, chunk)
             return
 
-    result = build_result(config, request.input_file_path)
-    send_job_event("JOB_DONE", request.conversation_id, request.user_id, result)
+    result = build_result(config, input_file_path)
+    send_job_event("JOB_DONE", conversation_id, user_id, result)
