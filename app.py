@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from langgraph.types import Command
 import dataclasses
 from workflow import graph
+from typing import Optional
 
 app = FastAPI()
 
@@ -23,6 +24,7 @@ class ResumeJobRequest(BaseModel):
     user_id: str
     answer: str
     input_file_path: str
+    prompt: Optional[str] = None
 
 
 def build_config(conversation_id, user_id):
@@ -92,7 +94,8 @@ def start_job(request: StartJobRequest):
         "column_stats": {},
         "status": "START",
         "errors": [],
-        "impute_strategy": "skip"
+        "impute_strategy": "skip",
+        "impute_prompt": ""
     }
 
     config = build_config(request.conversation_id, request.user_id)
@@ -116,8 +119,14 @@ def start_job(request: StartJobRequest):
 def resume_job(request: ResumeJobRequest):
     config = build_config(request.conversation_id, request.user_id)
 
+    resume_payload = (
+        {"strategy": request.answer, "prompt": request.prompt}
+        if request.prompt
+        else request.answer
+    )
+
     for chunk in graph.stream(
-        Command(resume=request.answer),
+        Command(resume=resume_payload),
         config=config,
         stream_mode="updates"
     ):

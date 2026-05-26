@@ -35,6 +35,8 @@ class State(TypedDict):
     errors: list[str]
 
     impute_strategy: str
+    impute_prompt: str
+
 
 def validate_file(state: State):
     headers = state.get("headers", [])
@@ -48,7 +50,6 @@ def validate_file(state: State):
 
     invalid_rows = []
     valid_rows = []
-
     length_headers = len(headers)
 
     for i, row in enumerate(raw_rows):
@@ -61,7 +62,6 @@ def validate_file(state: State):
                 f"({length_row}/{length_headers})"
             )
             invalid_rows.append(row)
-
         else:
             valid_rows.append(row)
 
@@ -70,6 +70,7 @@ def validate_file(state: State):
         "invalid_rows": invalid_rows,
         "valid_rows": valid_rows
     }
+
 
 def detect_columns(state: State):
     headers = state.get("headers", [])
@@ -128,17 +129,12 @@ def detect_columns(state: State):
             .replace("```", "")
             .strip()
         )
-
         detected_types = json.loads(clean_text)
 
     except Exception:
-        detected_types = {
-            h: "text"
-            for h in headers
-        }
+        detected_types = {h: "text" for h in headers}
 
     column_stats = {}
-
     for header in headers:
         column_stats[header] = {
             "detected_type": detected_types.get(header, "text")
@@ -149,16 +145,13 @@ def detect_columns(state: State):
         "column_stats": column_stats
     }
 
+
 def clean_and_normalize_data(state: State):
     valid_rows = state.get("valid_rows", [])
     headers = state.get("headers", [])
     column_stats = state.get("column_stats", {})
 
-    target_types = [
-        "name",
-        "address",
-        "categorical"
-    ]
+    target_types = ["name", "address", "categorical"]
 
     solve_columns = [
         h for h in headers
@@ -216,7 +209,6 @@ def clean_and_normalize_data(state: State):
                 .replace("```", "")
                 .strip()
             )
-
             result = json.loads(clean_text)
             normalize_map[col] = result.get(col, {})
 
@@ -226,7 +218,6 @@ def clean_and_normalize_data(state: State):
     for row in valid_rows:
         for col in solve_columns:
             old_value = row.get(col)
-
             if old_value is not None:
                 row[col] = (
                     normalize_map
@@ -239,6 +230,7 @@ def clean_and_normalize_data(state: State):
         "valid_rows": valid_rows
     }
 
+
 def ask_impute_strategy(state: State):
     answer = interrupt({
         "question": "Bạn muốn xử lý missing values như thế nào?",
@@ -249,22 +241,44 @@ def ask_impute_strategy(state: State):
         )
     })
 
+    strategy = answer
+    prompt = None
+    if isinstance(answer, dict):
+        strategy = answer.get("strategy", answer.get("answer", "skip"))
+        prompt = answer.get("prompt")
+
     return {
-        "impute_strategy": answer,
+        "impute_strategy": strategy,
+        "impute_prompt": prompt,
         "status": "IMPUTE_CHOICE_RECEIVED"
     }
+
 
 def solve_impute_missing_values(state: State):
     valid_rows = state.get("valid_rows", [])
     headers = state.get("headers", [])
     column_stats = state.get("column_stats", {})
     strategy = state.get("impute_strategy", "skip").lower()
+    user_prompt = state.get("impute_prompt")
 
     if strategy == "skip":
         return {
             "status": "IMPUTE_SKIPPED",
             "valid_rows": valid_rows
         }
+
+    prompt_text = (user_prompt or "").strip()
+    prompt_lower = prompt_text.lower()
+    wants_zero_impute = (
+        "xử lý" in prompt_lower
+        and ("số 0" in prompt_lower or "giá trị 0" in prompt_lower or "=0" in prompt_lower)
+    )
+
+    requested_zero_columns = []
+    if wants_zero_impute and headers:
+        for h in headers:
+            if h and h.lower() in prompt_lower:
+                requested_zero_columns.append(h)
 
     rows_with_missing = []
 
@@ -273,8 +287,20 @@ def solve_impute_missing_values(state: State):
 
         for header in headers:
             value = row.get(header)
+            is_missing = value is None or value == ""
 
-            if value is None or value == "":
+            if not is_missing and wants_zero_impute:
+                detected = column_stats.get(header, {}).get("detected_type")
+                is_number = detected == "number"
+                should_consider_column = (
+                    header in requested_zero_columns
+                    if requested_zero_columns
+                    else True
+                )
+                if is_number and should_consider_column and (value == 0 or value == "0"):
+                    is_missing = True
+
+            if is_missing:
                 missing_columns.append(header)
 
         if missing_columns:
@@ -292,17 +318,17 @@ def solve_impute_missing_values(state: State):
 
     system_message = SystemMessage(content="""
         Bạn là AI Data Engineer chuyên xử lý missing values.
-        
+
         Nhiệm vụ:
         - Chỉ điền giá trị đang thiếu
         - Không sửa giá trị đã tồn tại
         - Với number:
-          + suy luận mean/median hợp lý
+            + suy luận mean/median hợp lý
         - Với categorical/text/name/address/date:
-          + ưu tiên giá trị phổ biến hoặc context hợp lý
+            + ưu tiên giá trị phổ biến hoặc context hợp lý
         - Không tự bịa email/phone/id
         - Nếu email/phone/id thiếu:
-          + value = null
+            + value = null
         - Chỉ trả về JSON
         - Không markdown
         """)
@@ -310,6 +336,9 @@ def solve_impute_missing_values(state: State):
     human_message = HumanMessage(content=f"""
         Strategy:
         {strategy}
+
+        Hướng dẫn bổ sung từ người dùng (nếu có):
+        {prompt_text if prompt_text else "(không có)"}
         
         Headers:
         {headers}
@@ -341,7 +370,6 @@ def solve_impute_missing_values(state: State):
             .replace("```", "")
             .strip()
         )
-
         result = json.loads(clean_text)
 
     except Exception:
@@ -363,18 +391,14 @@ def solve_impute_missing_values(state: State):
 
         if row_index is None or column is None:
             continue
-
         if not isinstance(row_index, int):
             continue
-
         if row_index < 0 or row_index >= len(valid_rows):
             continue
-
         if column not in headers:
             continue
 
         current_value = valid_rows[row_index].get(column)
-
         if current_value is None or current_value == "":
             valid_rows[row_index][column] = value
 
@@ -388,7 +412,6 @@ def remove_duplicates(state: State):
     valid_rows = state.get("valid_rows", [])
 
     seen = set()
-
     deduped_rows = []
     duplicated_rows = []
 
@@ -398,7 +421,6 @@ def remove_duplicates(state: State):
         if row_tuple not in seen:
             seen.add(row_tuple)
             deduped_rows.append(row)
-
         else:
             row["_error"] = "Duplicate row"
             duplicated_rows.append(row)
@@ -410,9 +432,6 @@ def remove_duplicates(state: State):
     }
 
 
-# =========================================================
-# Route imputation
-# =========================================================
 def route_imputation(state: State) -> str:
     strategy = state.get("impute_strategy", "skip").lower()
 
@@ -420,6 +439,7 @@ def route_imputation(state: State) -> str:
         return "solve_impute_missing_values"
 
     return "remove_duplicates"
+
 
 def build_graph():
     builder = StateGraph(State)
@@ -432,47 +452,27 @@ def build_graph():
     builder.add_node("remove_duplicates", remove_duplicates)
 
     builder.add_edge(START, "validate_file")
-
     builder.add_edge("validate_file", "detect_columns")
-
-    builder.add_edge(
-        "detect_columns",
-        "clean_and_normalize_data"
-    )
-
-    builder.add_edge(
-        "clean_and_normalize_data",
-        "ask_impute_strategy"
-    )
+    builder.add_edge("detect_columns", "clean_and_normalize_data")
+    builder.add_edge("clean_and_normalize_data", "ask_impute_strategy")
 
     builder.add_conditional_edges(
         "ask_impute_strategy",
         route_imputation,
         {
-            "solve_impute_missing_values":
-                "solve_impute_missing_values",
-
-            "remove_duplicates":
-                "remove_duplicates",
+            "solve_impute_missing_values": "solve_impute_missing_values",
+            "remove_duplicates": "remove_duplicates",
         }
     )
 
-    builder.add_edge(
-        "solve_impute_missing_values",
-        "remove_duplicates"
-    )
-
-    builder.add_edge(
-        "remove_duplicates",
-        END
-    )
+    builder.add_edge("solve_impute_missing_values", "remove_duplicates")
+    builder.add_edge("remove_duplicates", END)
 
     return builder
 
+
 checkpointer_cm = PostgresSaver.from_conn_string(DB_URI)
-
 checkpointer = checkpointer_cm.__enter__()
-
 checkpointer.setup()
 
 builder = build_graph()
@@ -480,67 +480,3 @@ builder = build_graph()
 graph = builder.compile(
     checkpointer=checkpointer
 )
-
-# config = {
-#     "configurable": {
-#         "thread_id": "thread_001",
-#         "user_id": "001"
-#     }
-# }
-
-# input_state = {
-#     "headers": [
-#         "name",
-#         "age",
-#         "email"
-#     ],
-
-#     "raw_rows": [
-#         {
-#             "name": "nguyen van a",
-#             "age": 20,
-#             "email": "a@gmail.com"
-#         },
-
-#         {
-#             "name": "nguyen van a",
-#             "age": None,
-#             "email": "b@gmail.com"
-#         },
-
-#         {
-#             "name": None,
-#             "age": 22,
-#             "email": None
-#         }
-#     ],
-
-#     "invalid_rows": [],
-#     "valid_rows": [],
-#     "errors": [],
-#     "column_stats": {},
-#     "status": "START",
-#     "impute_strategy": "skip"
-# }
-
-# print("=== START ===")
-
-# for chunk in graph.stream(
-#     input_state,
-#     config=config,
-#     stream_mode="updates"
-# ):
-#     print(chunk)
-
-# choice = input(
-#     "Chọn strategy [ai/skip]: "
-# ).strip().lower()
-
-# print("=== RESUME ===")
-
-# for chunk in graph.stream(
-#     Command(resume=choice),
-#     config=config,
-#     stream_mode="updates"
-# ):
-#     print(chunk)
