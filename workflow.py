@@ -278,28 +278,81 @@ def _compute_column_medians(valid_rows: list, headers: list, column_stats: dict)
     return medians
 
 
-def _collect_candidate_rows(valid_rows: list, headers: list, column_stats: dict) -> list:
+def _ask_llm_impute_policy(
+    headers: list,
+    column_stats: dict,
+    column_medians: dict,
+    prompt_text: str,
+    missing_summary: dict,
+    llm,
+) -> dict:
     """
-    Thu thập các row có bất kỳ giá trị None/"" hoặc 0 ở cột number.
-    Gửi toàn bộ cho LLM phán quyết — không pre-filter theo prompt.
+    Hỏi LLM một lần duy nhất: với mỗi cột, giá trị nào cần impute và dùng gì để fill.
+    Trả về policy dict:
+    {
+      "Insulin": {"treat_zero_as_missing": true, "fill_value": 94.5},
+      "Glucose": {"treat_zero_as_missing": false, "fill_value": null},
+      ...
+    }
     """
-    candidates = []
-    for index, row in enumerate(valid_rows):
-        suspect_cols = []
-        for header in headers:
-            value = row.get(header)
-            if value is None or value == "":
-                suspect_cols.append(header)
-            elif (value == 0 or value == "0") and \
-                    column_stats.get(header, {}).get("detected_type") == "number":
-                suspect_cols.append(header)
-        if suspect_cols:
-            candidates.append({
-                "row_index": index,
-                "row": row,
-                "suspect_columns": suspect_cols
-            })
-    return candidates
+    system_message = SystemMessage(content="""
+        Bạn là AI Data Engineer.
+        Nhiệm vụ: Quyết định imputation policy cho từng cột dựa trên hướng dẫn người dùng.
+
+        Quy tắc:
+        - Khớp tên cột linh hoạt (sai chính tả nhẹ, viết tắt đều OK).
+        - treat_zero_as_missing=true nếu người dùng yêu cầu hoặc 0 vô nghĩa với cột đó.
+        - fill_value: dùng median từ column_medians nếu có, hoặc giá trị hợp lý.
+        - Không bịa email/phone/id — fill_value=null nếu không biết.
+        - Chỉ trả về JSON, không markdown.
+        """)
+
+    human_message = HumanMessage(content=f"""
+        Hướng dẫn từ người dùng: {prompt_text if prompt_text else "(không có)"}
+
+        Headers: {headers}
+        Column stats: {column_stats}
+        Median thực tế từ data: {column_medians}
+        Số lượng giá trị bị thiếu/0 theo cột: {missing_summary}
+
+        Trả về JSON:
+        {{
+          "ColumnName": {{
+            "treat_zero_as_missing": true,
+            "fill_value": 94.5
+          }}
+        }}
+        """)
+
+    response = llm.invoke([system_message, human_message])
+    try:
+        clean = (
+            response.content
+            .replace("```json", "")
+            .replace("```", "")
+            .strip()
+        )
+        return json.loads(clean)
+    except Exception:
+        return {}
+
+
+def _build_missing_summary(valid_rows: list, headers: list, column_stats: dict) -> dict:
+    """Đếm số lượng None/"" và 0 theo từng cột — không gửi raw rows lên LLM."""
+    summary = {}
+    for header in headers:
+        null_count = 0
+        zero_count = 0
+        is_number = column_stats.get(header, {}).get("detected_type") == "number"
+        for row in valid_rows:
+            v = row.get(header)
+            if v is None or v == "":
+                null_count += 1
+            elif is_number and (v == 0 or v == "0"):
+                zero_count += 1
+        if null_count > 0 or zero_count > 0:
+            summary[header] = {"null_count": null_count, "zero_count": zero_count}
+    return summary
 
 
 def solve_impute_missing_values(state: State):
@@ -317,101 +370,46 @@ def solve_impute_missing_values(state: State):
 
     prompt_text = (user_prompt or "").strip()
 
-    # Tính median thực tế từ data
+    # Bước 1: tính median từ data (Python thuần, không cần LLM)
     column_medians = _compute_column_medians(valid_rows, headers, column_stats)
 
-    # Thu thập candidates — không dùng string matching, để LLM tự phán quyết
-    candidates = _collect_candidate_rows(valid_rows, headers, column_stats)
+    # Bước 2: tóm tắt missing — chỉ gửi thống kê, không gửi raw rows
+    missing_summary = _build_missing_summary(valid_rows, headers, column_stats)
 
-    if not candidates:
+    if not missing_summary:
         return {
             "status": "NO_MISSING_VALUES",
             "valid_rows": valid_rows
         }
 
-    # LLM vừa xác định đâu thực sự là missing, vừa điền giá trị luôn
-    system_message = SystemMessage(content="""
-        Bạn là AI Data Engineer chuyên xử lý missing values.
+    # Bước 3: LLM quyết định policy (payload nhỏ: vài trăm token)
+    policy = _ask_llm_impute_policy(
+        headers, column_stats, column_medians, prompt_text, missing_summary, llm
+    )
 
-        Nhiệm vụ:
-        - Xác định những (row_index, column) thực sự cần impute dựa trên
-          hướng dẫn người dùng và ngữ cảnh dữ liệu.
-        - Khớp tên cột linh hoạt: sai chính tả nhẹ, viết tắt... đều được chấp nhận.
-        - Giá trị None/"" luôn là missing.
-        - Giá trị 0 ở cột number: chỉ là missing nếu người dùng yêu cầu
-          hoặc ngữ cảnh cho thấy 0 vô nghĩa (ví dụ Insulin=0 trong dataset y tế).
-        - Với number: dùng median đã tính sẵn trong column_medians.
-        - Với categorical/text/name/address/date: dùng giá trị phổ biến hoặc context hợp lý.
-        - Không tự bịa email/phone/id — nếu thiếu thì value = null.
-        - Chỉ trả về JSON, không markdown.
-        """)
-
-    human_message = HumanMessage(content=f"""
-        Hướng dẫn từ người dùng:
-        {prompt_text if prompt_text else "(không có)"}
-
-        Headers: {headers}
-        Column stats: {column_stats}
-        Median thực tế đã tính từ data: {column_medians}
-
-        Các rows nghi ngờ có missing (suspect_columns là gợi ý, LLM tự quyết):
-        {candidates}
-
-        Trả về JSON dạng:
-        {{
-          "imputations": [
-            {{
-              "row_index": 1,
-              "column": "Insulin",
-              "value": 94.5
-            }}
-          ]
-        }}
-        """)
-
-    response = llm.invoke([system_message, human_message])
-
-    try:
-        clean_text = (
-            response.content
-            .replace("```json", "")
-            .replace("```", "")
-            .strip()
-        )
-        result = json.loads(clean_text)
-
-    except Exception:
+    if not policy:
         return {
             "status": "AI_IMPUTE_FAILED",
             "valid_rows": valid_rows,
-            "errors": (
-                state.get("errors", [])
-                + ["AI không trả JSON hợp lệ."]
-            )
+            "errors": state.get("errors", []) + ["LLM không trả policy hợp lệ."]
         }
 
-    imputations = result.get("imputations", [])
+    # Bước 4: Python apply policy lên toàn bộ rows — không cần LLM nữa
+    for row in valid_rows:
+        for col, col_policy in policy.items():
+            if col not in headers:
+                continue
+            fill_value = col_policy.get("fill_value")
+            treat_zero = col_policy.get("treat_zero_as_missing", False)
+            if fill_value is None:
+                continue
 
-    for item in imputations:
-        row_index = item.get("row_index")
-        column = item.get("column")
-        value = item.get("value")
+            current = row.get(col)
+            is_null = current is None or current == ""
+            is_zero = treat_zero and (current == 0 or current == "0")
 
-        if row_index is None or column is None:
-            continue
-        if not isinstance(row_index, int):
-            continue
-        if row_index < 0 or row_index >= len(valid_rows):
-            continue
-        if column not in headers:
-            continue
-
-        current_value = valid_rows[row_index].get(column)
-        is_empty = current_value is None or current_value == ""
-        is_zero = current_value == 0 or current_value == "0"
-
-        if is_empty or is_zero:
-            valid_rows[row_index][column] = value
+            if is_null or is_zero:
+                row[col] = fill_value
 
     return {
         "status": "AI_IMPUTED_MISSING_VALUES",
