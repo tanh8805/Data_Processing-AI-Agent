@@ -5,20 +5,20 @@ from typing import TypedDict, Annotated, Any
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt, Command
 
 load_dotenv()
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DB_URI = os.getenv("DB_URI")
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
     temperature=0,
-    google_api_key=GOOGLE_API_KEY
+    api_key=GROQ_API_KEY
 )
 
 
@@ -85,7 +85,7 @@ def detect_columns(state: State):
 
     system_message = SystemMessage(content="""
         Bạn là AI Data Engineer chuyên tiền xử lý dữ liệu.
-        
+
         Phong cách:
         - Chính xác
         - Ngắn gọn
@@ -97,7 +97,7 @@ def detect_columns(state: State):
     human_message = HumanMessage(content=f"""
         Dựa vào headers và sample data dưới đây,
         hãy detect datatype cho từng cột.
-        
+
         Allowed types:
         - email
         - number
@@ -106,13 +106,13 @@ def detect_columns(state: State):
         - address
         - categorical
         - text
-        
+
         Headers:
         {headers}
-        
+
         Sample rows:
         {sample_rows}
-        
+
         Trả về JSON dạng:
         {{
           "name": "name",
@@ -176,7 +176,7 @@ def clean_and_normalize_data(state: State):
 
         system_message = SystemMessage(content="""
             Bạn là AI chuyên chuẩn hóa dữ liệu.
-            
+
             Nhiệm vụ:
             - Chuẩn hóa viết hoa/thường
             - Sửa lỗi chính tả nhẹ
@@ -188,10 +188,10 @@ def clean_and_normalize_data(state: State):
         human_message = HumanMessage(content=f"""
             Datatype:
             {col_type}
-            
+
             Values:
             {unique_values}
-            
+
             Trả về JSON:
             {{
               "column_name": {{
@@ -299,14 +299,14 @@ def solve_impute_missing_values(state: State):
     prompt_text = (user_prompt or "").strip()
     prompt_lower = prompt_text.lower()
 
-    # FIX 1: Detect zero impute linh hoạt — chỉ cần prompt có "0" và tên cột
+    # Detect zero impute linh hoạt — chỉ cần prompt có "0" và tên cột
     mentioned_columns = _detect_zero_columns_from_prompt(prompt_lower, headers)
     wants_zero_impute = "0" in prompt_lower and len(mentioned_columns) > 0
 
     # Nếu không mention cột cụ thể nhưng có "0", áp dụng cho tất cả cột number
     requested_zero_columns = mentioned_columns if mentioned_columns else []
 
-    # FIX 2: Tính median thực tế từ data trước khi xử lý
+    # Tính median thực tế từ data trước khi xử lý
     column_medians = _compute_column_medians(valid_rows, headers, column_stats)
 
     rows_with_missing = []
@@ -430,7 +430,7 @@ def solve_impute_missing_values(state: State):
 
         current_value = valid_rows[row_index].get(column)
 
-        # FIX 3: Cho phép update cả giá trị 0 (không chỉ None/"")
+        # Cho phép update cả giá trị 0 (không chỉ None/"")
         is_empty = current_value is None or current_value == ""
         is_zero_to_replace = (
             wants_zero_impute

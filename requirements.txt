@@ -18,3 +18,4 @@ langchain-google-genai
 
 psycopg[binary]
 
+langchain-groq
