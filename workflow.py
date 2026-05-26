@@ -254,6 +254,35 @@ def ask_impute_strategy(state: State):
     }
 
 
+def _compute_column_medians(valid_rows: list, headers: list, column_stats: dict) -> dict:
+    """Tính median thực tế từ data cho các cột number (bỏ qua None, "", 0)."""
+    medians = {}
+    for header in headers:
+        detected = column_stats.get(header, {}).get("detected_type")
+        if detected != "number":
+            continue
+        values = []
+        for row in valid_rows:
+            v = row.get(header)
+            if v is not None and v != "" and v != 0 and v != "0":
+                try:
+                    values.append(float(v))
+                except (ValueError, TypeError):
+                    pass
+        if values:
+            values.sort()
+            n = len(values)
+            mid = n // 2
+            median = values[mid] if n % 2 == 1 else (values[mid - 1] + values[mid]) / 2
+            medians[header] = median
+    return medians
+
+
+def _detect_zero_columns_from_prompt(prompt_lower: str, headers: list) -> list:
+    """Trả về list các cột được đề cập trong prompt (case-insensitive)."""
+    return [h for h in headers if h and h.lower() in prompt_lower]
+
+
 def solve_impute_missing_values(state: State):
     valid_rows = state.get("valid_rows", [])
     headers = state.get("headers", [])
@@ -269,16 +298,16 @@ def solve_impute_missing_values(state: State):
 
     prompt_text = (user_prompt or "").strip()
     prompt_lower = prompt_text.lower()
-    wants_zero_impute = (
-        "xử lý" in prompt_lower
-        and ("số 0" in prompt_lower or "giá trị 0" in prompt_lower or "=0" in prompt_lower)
-    )
 
-    requested_zero_columns = []
-    if wants_zero_impute and headers:
-        for h in headers:
-            if h and h.lower() in prompt_lower:
-                requested_zero_columns.append(h)
+    # FIX 1: Detect zero impute linh hoạt — chỉ cần prompt có "0" và tên cột
+    mentioned_columns = _detect_zero_columns_from_prompt(prompt_lower, headers)
+    wants_zero_impute = "0" in prompt_lower and len(mentioned_columns) > 0
+
+    # Nếu không mention cột cụ thể nhưng có "0", áp dụng cho tất cả cột number
+    requested_zero_columns = mentioned_columns if mentioned_columns else []
+
+    # FIX 2: Tính median thực tế từ data trước khi xử lý
+    column_medians = _compute_column_medians(valid_rows, headers, column_stats)
 
     rows_with_missing = []
 
@@ -322,13 +351,11 @@ def solve_impute_missing_values(state: State):
         Nhiệm vụ:
         - Chỉ điền giá trị đang thiếu
         - Không sửa giá trị đã tồn tại
-        - Với number:
-            + suy luận mean/median hợp lý
+        - Với number: ưu tiên dùng median đã được tính sẵn trong column_medians
         - Với categorical/text/name/address/date:
             + ưu tiên giá trị phổ biến hoặc context hợp lý
         - Không tự bịa email/phone/id
-        - Nếu email/phone/id thiếu:
-            + value = null
+        - Nếu email/phone/id thiếu: value = null
         - Chỉ trả về JSON
         - Không markdown
         """)
@@ -339,16 +366,19 @@ def solve_impute_missing_values(state: State):
 
         Hướng dẫn bổ sung từ người dùng (nếu có):
         {prompt_text if prompt_text else "(không có)"}
-        
+
         Headers:
         {headers}
-        
+
         Column stats:
         {column_stats}
-        
+
+        Median thực tế đã tính từ data (dùng cho cột number):
+        {column_medians}
+
         Rows cần xử lý:
         {rows_with_missing}
-        
+
         Trả về JSON dạng:
         {{
           "imputations": [
@@ -399,7 +429,16 @@ def solve_impute_missing_values(state: State):
             continue
 
         current_value = valid_rows[row_index].get(column)
-        if current_value is None or current_value == "":
+
+        # FIX 3: Cho phép update cả giá trị 0 (không chỉ None/"")
+        is_empty = current_value is None or current_value == ""
+        is_zero_to_replace = (
+            wants_zero_impute
+            and (current_value == 0 or current_value == "0")
+            and (column in requested_zero_columns or not requested_zero_columns)
+        )
+
+        if is_empty or is_zero_to_replace:
             valid_rows[row_index][column] = value
 
     return {
