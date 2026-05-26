@@ -278,9 +278,28 @@ def _compute_column_medians(valid_rows: list, headers: list, column_stats: dict)
     return medians
 
 
-def _detect_zero_columns_from_prompt(prompt_lower: str, headers: list) -> list:
-    """Trả về list các cột được đề cập trong prompt (case-insensitive)."""
-    return [h for h in headers if h and h.lower() in prompt_lower]
+def _collect_candidate_rows(valid_rows: list, headers: list, column_stats: dict) -> list:
+    """
+    Thu thập các row có bất kỳ giá trị None/"" hoặc 0 ở cột number.
+    Gửi toàn bộ cho LLM phán quyết — không pre-filter theo prompt.
+    """
+    candidates = []
+    for index, row in enumerate(valid_rows):
+        suspect_cols = []
+        for header in headers:
+            value = row.get(header)
+            if value is None or value == "":
+                suspect_cols.append(header)
+            elif (value == 0 or value == "0") and \
+                    column_stats.get(header, {}).get("detected_type") == "number":
+                suspect_cols.append(header)
+        if suspect_cols:
+            candidates.append({
+                "row_index": index,
+                "row": row,
+                "suspect_columns": suspect_cols
+            })
+    return candidates
 
 
 def solve_impute_missing_values(state: State):
@@ -297,95 +316,54 @@ def solve_impute_missing_values(state: State):
         }
 
     prompt_text = (user_prompt or "").strip()
-    prompt_lower = prompt_text.lower()
 
-    # Detect zero impute linh hoạt — chỉ cần prompt có "0" và tên cột
-    mentioned_columns = _detect_zero_columns_from_prompt(prompt_lower, headers)
-    wants_zero_impute = "0" in prompt_lower and len(mentioned_columns) > 0
-
-    # Nếu không mention cột cụ thể nhưng có "0", áp dụng cho tất cả cột number
-    requested_zero_columns = mentioned_columns if mentioned_columns else []
-
-    # Tính median thực tế từ data trước khi xử lý
+    # Tính median thực tế từ data
     column_medians = _compute_column_medians(valid_rows, headers, column_stats)
 
-    rows_with_missing = []
+    # Thu thập candidates — không dùng string matching, để LLM tự phán quyết
+    candidates = _collect_candidate_rows(valid_rows, headers, column_stats)
 
-    for index, row in enumerate(valid_rows):
-        missing_columns = []
-
-        for header in headers:
-            value = row.get(header)
-            is_missing = value is None or value == ""
-
-            if not is_missing and wants_zero_impute:
-                detected = column_stats.get(header, {}).get("detected_type")
-                is_number = detected == "number"
-                should_consider_column = (
-                    header in requested_zero_columns
-                    if requested_zero_columns
-                    else True
-                )
-                if is_number and should_consider_column and (value == 0 or value == "0"):
-                    is_missing = True
-
-            if is_missing:
-                missing_columns.append(header)
-
-        if missing_columns:
-            rows_with_missing.append({
-                "row_index": index,
-                "row": row,
-                "missing_columns": missing_columns
-            })
-
-    if not rows_with_missing:
+    if not candidates:
         return {
             "status": "NO_MISSING_VALUES",
             "valid_rows": valid_rows
         }
 
+    # LLM vừa xác định đâu thực sự là missing, vừa điền giá trị luôn
     system_message = SystemMessage(content="""
         Bạn là AI Data Engineer chuyên xử lý missing values.
 
         Nhiệm vụ:
-        - Chỉ điền giá trị đang thiếu
-        - Không sửa giá trị đã tồn tại
-        - Với number: ưu tiên dùng median đã được tính sẵn trong column_medians
-        - Với categorical/text/name/address/date:
-            + ưu tiên giá trị phổ biến hoặc context hợp lý
-        - Không tự bịa email/phone/id
-        - Nếu email/phone/id thiếu: value = null
-        - Chỉ trả về JSON
-        - Không markdown
+        - Xác định những (row_index, column) thực sự cần impute dựa trên
+          hướng dẫn người dùng và ngữ cảnh dữ liệu.
+        - Khớp tên cột linh hoạt: sai chính tả nhẹ, viết tắt... đều được chấp nhận.
+        - Giá trị None/"" luôn là missing.
+        - Giá trị 0 ở cột number: chỉ là missing nếu người dùng yêu cầu
+          hoặc ngữ cảnh cho thấy 0 vô nghĩa (ví dụ Insulin=0 trong dataset y tế).
+        - Với number: dùng median đã tính sẵn trong column_medians.
+        - Với categorical/text/name/address/date: dùng giá trị phổ biến hoặc context hợp lý.
+        - Không tự bịa email/phone/id — nếu thiếu thì value = null.
+        - Chỉ trả về JSON, không markdown.
         """)
 
     human_message = HumanMessage(content=f"""
-        Strategy:
-        {strategy}
-
-        Hướng dẫn bổ sung từ người dùng (nếu có):
+        Hướng dẫn từ người dùng:
         {prompt_text if prompt_text else "(không có)"}
 
-        Headers:
-        {headers}
+        Headers: {headers}
+        Column stats: {column_stats}
+        Median thực tế đã tính từ data: {column_medians}
 
-        Column stats:
-        {column_stats}
-
-        Median thực tế đã tính từ data (dùng cho cột number):
-        {column_medians}
-
-        Rows cần xử lý:
-        {rows_with_missing}
+        Các rows nghi ngờ có missing (suspect_columns là gợi ý, LLM tự quyết):
+        {candidates}
 
         Trả về JSON dạng:
         {{
           "imputations": [
             {{
               "row_index": 1,
-              "column": "age",
-              "value": 20
+              "column": "Insulin",
+              "value": 94.5
             }}
           ]
         }}
@@ -429,16 +407,10 @@ def solve_impute_missing_values(state: State):
             continue
 
         current_value = valid_rows[row_index].get(column)
-
-        # Cho phép update cả giá trị 0 (không chỉ None/"")
         is_empty = current_value is None or current_value == ""
-        is_zero_to_replace = (
-            wants_zero_impute
-            and (current_value == 0 or current_value == "0")
-            and (column in requested_zero_columns or not requested_zero_columns)
-        )
+        is_zero = current_value == 0 or current_value == "0"
 
-        if is_empty or is_zero_to_replace:
+        if is_empty or is_zero:
             valid_rows[row_index][column] = value
 
     return {
